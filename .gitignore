@@ -1,2 +1,6 @@
 *.csv
 *.xlsx
+*.DB
+*.TRN
+*.PX
+*.pkl
