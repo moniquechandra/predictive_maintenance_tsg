@@ -5,3 +5,5 @@
 *.PX
 *.pkl
 *.feather
+
+data/
