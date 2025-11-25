@@ -27,36 +27,56 @@ random_df = [pd.read_csv(path,sep=";") for path in csv_file]
 #     if col not in random_df[0].columns:
 #         print(col)
 
-count_undef = (combined_df["afgekeurd"] == "Undef").sum()
-percentage_undef = (count_undef / len(combined_df)) * 100
+def percentage_undef_empty(df, column):
+    count_undef = (df[column] == "Undef").sum()
+    percentage_undef = (count_undef / len(df)) * 100
 
-count_empty = combined_df["afgekeurd"].isna().sum()
-percentage_empty = (count_empty / len(combined_df)) * 100
+    count_empty = df[column].isna().sum()
+    percentage_empty = (count_empty / len(df)) * 100
 
-print(f"Percentage of 'Undef' in 'afgekeurd' column: {percentage_undef:.2f}%")
-print(f"Percentage of empty/NaN values in 'afgekeurd' column: {percentage_empty:.2f}%")
+    return percentage_undef, percentage_empty
 
-df_sorted = combined_df.sort_values("TimeInt").reset_index(drop=True)
-df_clean = df_sorted[df_sorted["afgekeurd"] != "Undef"].reset_index(drop=True)
-print(df_clean)
+percentage_undef, percentage_empty = percentage_undef_empty(combined_df, "afgekeurd")
 
-chunk_size = 100
-previous_counts = None
-change_count = 0
+def clean_df(df):
+    df_sorted = df.sort_values("TimeInt").reset_index(drop=True)
+    df_clean = df_sorted[df_sorted["afgekeurd"] != "Undef"].reset_index(drop=True)
+    return df_clean
 
-for i in range(0, len(df_clean), chunk_size):
-    chunk = df_clean.iloc[i:i+chunk_size]
-    counts = chunk["afgekeurd"].value_counts(dropna=False)  # include NaN if any
-    #print(f"Rows {i} to {i+chunk_size-1}:")
-    #print(counts)
-    
-    if previous_counts is not None:
-        if not counts.equals(previous_counts):
-            print(" -> Counts changed from previous chunk!\n")
-            change_count += 1
+df_clean = clean_df(combined_df)
+
+def proto_shift_count(df, col, chunk_size):
+    shift_count = 0
+    previous_value = None
+
+    for i in range(0, len(df), chunk_size):
+        chunk = df.iloc[i:i+chunk_size]
+        most_frequent = chunk[col].mode()[0]  # Get the most frequent value in the chunk
+
+        if previous_value is not None and most_frequent != previous_value:
+            shift_count += 1
+
+        previous_value = most_frequent
+
+    print(f"Number of shifts in '{col}' with chunk size {chunk_size}: {shift_count}")
+    return shift_count
+
+proto_shift = proto_shift_count(df_clean, "afgekeurd", 100)
+
+def shift_count_in_constant_flow(df, col, min_constant):
+    shift_count = 0
+    current_value = None
+    current_length = 0
+
+    for val in df[col]:
+        if val == current_value:
+            current_length += 1
         else:
-            print(" -> Counts are the same as previous chunk.\n")
-    
-    previous_counts = counts
+            if current_length >= min_constant:
+                shift_count += 1
+            current_value = val
+            current_length = 1
+    print(f"Number of shifts in '{col}' with constant flow ≥ {min_constant}: {shift_count}")
+    return shift_count
 
-print(change_count)
+shift_count = shift_count_in_constant_flow(df_clean, "afgekeurd", 100)
