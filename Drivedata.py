@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 import glob
 import seaborn as sns
 import matplotlib.pyplot as plt
@@ -29,21 +30,42 @@ def concat_csv_files():
         return combined
 
 combined_df = concat_csv_files()
-print(len(combined_df))
-print(combined_df)
 
-combined_df = combined_df[:10000]
+def create_diffs_df(df,keys):
+    diff_lists = {}
 
-corr = combined_df.corr().abs()
+    for key in keys:
+        diff_lists[key] = np.abs(
+            df[f"{key}_Actual position value"] -
+            df[f"{key}_Target position"]
+        )
+    diff_df = pd.DataFrame(diff_lists)
+    return diff_df
 
-pairs = []
-columns = corr.columns
+keys = ["22", "24", "26", "28", "30"]
 
-for i, j in itertools.combinations(columns, 2):
-    pairs.append((i, j, corr.loc[i, j]))
+diff_df = create_diffs_df(combined_df, keys)
 
-corr_pairs = pd.DataFrame(pairs, columns=["feature_1", "feature_2", "corr_value"])
+def create_top100_df(df):
+    top100_df = pd.DataFrame({
+        key: diff_df[key].nlargest(100).values
+        for key in df.columns
+    })
+    top100_df.to_excel("data/SVRM2_Drive_data/top100_diffs.xlsx", index=False)
+    return top100_df
 
-least_corr_pairs = corr_pairs.sort_values("corr_value").head(50)
+top100_df = create_top100_df(diff_df)
 
-print(least_corr_pairs)
+thresholds = [200, 100, 50, 10, 5, 2, 1]
+
+result = pd.DataFrame(
+    {
+        key: [(diff_df[key] > t).sum() for t in thresholds]
+        for key in diff_df.columns
+    },
+    index=thresholds
+)
+
+result.to_excel("data/SVRM2_Drive_data/diff_thresholds_counts.xlsx")
+
+print(result)
