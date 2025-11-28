@@ -1,5 +1,8 @@
 import pandas as pd
 import glob
+import seaborn as sns
+import matplotlib.pyplot as plt
+import itertools
 
 def concat_csv_files():
     try:
@@ -29,3 +32,18 @@ combined_df = concat_csv_files()
 print(len(combined_df))
 print(combined_df)
 
+combined_df = combined_df[:10000]
+
+corr = combined_df.corr().abs()
+
+pairs = []
+columns = corr.columns
+
+for i, j in itertools.combinations(columns, 2):
+    pairs.append((i, j, corr.loc[i, j]))
+
+corr_pairs = pd.DataFrame(pairs, columns=["feature_1", "feature_2", "corr_value"])
+
+least_corr_pairs = corr_pairs.sort_values("corr_value").head(50)
+
+print(least_corr_pairs)
