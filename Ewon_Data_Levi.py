@@ -1,6 +1,11 @@
 import numpy as np
 import pandas as pd
 import glob
+from sklearn.preprocessing import LabelEncoder
+from sklearn.preprocessing import OrdinalEncoder
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report
+
 
 def concat_csv_files():
     try:
@@ -80,3 +85,44 @@ def shift_count_in_constant_flow(df, col, min_constant):
     return shift_count
 
 shift_count = shift_count_in_constant_flow(df_clean, "afgekeurd", 100)
+
+df_clean = df_clean[pd.to_numeric(df_clean["afgekeurd"], errors='coerce').notna()].reset_index(drop=True)
+df_clean["afgekeurd"] = pd.to_numeric(df_clean["afgekeurd"], errors='coerce')
+df_clean["afgekeurd_next"] = df_clean["afgekeurd"].shift(-1)
+df_clean["will_shift"] = (df_clean["afgekeurd"] != df_clean["afgekeurd_next"]).astype(int)
+
+
+train_size = int(len(df_clean) * 0.8)
+train = df_clean.iloc[:train_size]
+test = df_clean.iloc[train_size:]
+
+X_train = train.drop(columns=["afgekeurd", "afgekeurd_next", "will_shift", "TimeInt", "TimeStr"])
+y_train = train["will_shift"]
+
+X_test = test.drop(columns=["afgekeurd", "afgekeurd_next", "will_shift", "TimeInt", "TimeStr"])
+y_test = test["will_shift"]
+
+cat_cols = [col for col in X_train.columns if X_train[col].dtype == "object"]
+
+encoder = OrdinalEncoder(
+    handle_unknown="use_encoded_value",
+    unknown_value=-1
+)
+
+for col in cat_cols:
+    X_train[col] = encoder.fit_transform(X_train[[col]])
+    X_test[col] = encoder.transform(X_test[[col]])
+
+model = RandomForestClassifier(
+    n_estimators=300,
+    max_depth=20,
+    class_weight="balanced",
+    n_jobs=-1
+)
+
+model.fit(X_train, y_train)
+pred = model.predict(X_test)
+print(classification_report(y_test, pred))
+
+fi = pd.Series(model.feature_importances_, index=X_train.columns)
+print("Top predictive features:\n", fi.sort_values(ascending=False).head(20))
