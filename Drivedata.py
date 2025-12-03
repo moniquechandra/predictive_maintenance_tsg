@@ -1,6 +1,9 @@
 import pandas as pd
 import numpy as np
 import glob
+import seaborn as sns
+import matplotlib.pyplot as plt
+import itertools
 
 def concat_csv_files():
     try:
@@ -66,26 +69,3 @@ result = pd.DataFrame(
 result.to_excel("data/SVRM2_Drive_data/diff_thresholds_counts.xlsx")
 
 print(result)
-
-#print(combined_df.columns)
-
-
-
-columns_of_interest = [
-    #'0_HMI.VerStel1_L.Settings.GewenstePositie',
-    #'0_HMI.VerStel1_R.Settings.GewenstePositie',
-    #'0_HMI.VerStel2_B.Settings.GewenstePositie',
-    #'0_HMI.VerStel2_O.Settings.GewenstePositie',
-    #'0_UserVarGlobal.KnipklemOpen', 
-    #'0_UserVarGlobal.KnipklemSluiten',
-    #'0_UserVarGlobal.AfvoerCCw', 
-    #'0_UserVarGlobal.AfvoerLeeg',
-    '0_UserVarGlobal.AfvoerSlagAfkeur', 
-    #'0_UserVarGlobal.AfvoerSlagGoed',
-    #'0_UserVarGlobal.AfvoerStang', 
-    #'0_UserVarGlobal.AfvoerStart'
-]
-# Create a new DataFrame with unique values for only these columns
-unique_df = pd.DataFrame({col: pd.Series(combined_df[col].unique()) for col in columns_of_interest})
-
-print(unique_df)
