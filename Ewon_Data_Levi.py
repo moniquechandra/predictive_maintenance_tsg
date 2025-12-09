@@ -49,7 +49,7 @@ def percentage_undef_empty(df, column):
 percentage_undef, percentage_empty = percentage_undef_empty(combined_df, "afgekeurd")
 
 def clean_df(df):
-    df_sorted = df.sort_values("TimeInt").reset_index(drop=True)
+    df_sorted = df.sort_values("TimeInt").drop_duplicates(subset="TimeInt",keep="first").reset_index(drop=True)
     df_clean = df_sorted[df_sorted["afgekeurd"] != "Undef"].reset_index(drop=True)
     return df_clean
 
@@ -123,10 +123,12 @@ def show_column_specs(df, column_name):
     else:
         print(f"Column '{column_name}' does not exist in the DataFrame.")
 
-show_column_specs(df_clean, "afgekeurd")
+#show_column_specs(df_clean, "afgekeurd")
 
 
 def calculate_max_min_slope(df):
+    df["afgekeurd"] = pd.to_numeric(df["afgekeurd"], errors="coerce")
+    df["afgekeurd_inc"] = df["afgekeurd"].diff().fillna(0)
     include_cols_maybe = ["d_hor_offset","d_vert_offset,","StangData.Correctie_Totale_lengte","StangData.Correctie_Totale_lengte_operator_trek1en3",
                     "StangData.Offset_knipklem_knippositie_Operator","StangData.Pos_inloCor_1_trek13","StangData.Pos_inloCor_1_trek24",
                     "StangData.Pos_inloCor_2_trek13","StangData.Pos_inloCor_2_trek24","StangData.Pos_uitloCor_1_trek13", "StangData.Pos_uitloCor_1_trek24",
@@ -146,9 +148,105 @@ def calculate_max_min_slope(df):
         columns=[f"{c}_slope" for c in include_cols],
         index=df.index[1:]
 )
-
-    result = pd.concat([df[["TimeInt","afgekeurd"]],include_cols], axis=1)
+    result = pd.concat([df[["TimeInt","afgekeurd_inc"] + include_cols],slopes], axis=1)
 
     return result
 
-print(calculate_max_min_slope(df_clean))
+slope_df = calculate_max_min_slope(df_clean)
+
+print(slope_df.columns)
+
+def create_final_df(df,window_size):
+    slope_cols = [col for col in df.columns if col.endswith("_slope")]
+    agg_result = []
+    for start in range(0, len(df) - window_size + 1, window_size):
+        end = start + window_size
+        window = df.iloc[start:end]
+        max_slopes = window.loc[:, slope_cols].max()
+        sum_afgekeurd = window["afgekeurd_inc"].sum()
+        
+        # Optional: include group/time of first row
+        row = {
+            "time_start": window["TimeInt"].iloc[0],
+            "time_end": window["TimeInt"].iloc[-1],
+            **max_slopes.to_dict(),
+            "sum_afgekeurd": sum_afgekeurd
+        }
+        agg_result.append(row)
+
+    agg_df = pd.DataFrame(agg_result)
+    return agg_df
+
+agg_df = create_final_df(slope_df,100)
+agg_df.loc[agg_df["sum_afgekeurd"] <= 0, "sum_afgekeurd"] = 0
+
+#slope_df.to_excel("data/New_SVRM3_Ewon/slope_analysis.xlsx", index=False)
+
+print(agg_df)
+
+show_column_specs(agg_df, "sum_afgekeurd")
+
+plt.figure()
+plt.plot(agg_df["time_start"], agg_df["sum_afgekeurd"])
+plt.xlabel("Time")
+plt.ylabel("Extra sum")
+plt.title("Extra sum per window")
+plt.show()
+
+
+def train_random_forest(df):
+    feature_cols = [col for col in df.columns if col.endswith("_slope")]
+    X = df[feature_cols]
+    y = df["sum_afgekeurd"]
+
+    # Encode target variable
+    y_encoded = LabelEncoder().fit_transform(y)
+
+    # Split data into training and testing sets
+    split_index = int(0.8 * len(df))
+    X_train, X_test = X.iloc[:split_index], X.iloc[split_index:]
+    y_train, y_test = y_encoded[:split_index], y_encoded[split_index:]
+
+    # Train Random Forest Classifier
+    clf = RandomForestClassifier(n_estimators=100, random_state=42)
+    clf.fit(X_train, y_train)
+
+    # Make predictions
+    y_pred = clf.predict(X_test)
+
+    # Evaluate the model
+    report = classification_report(y_test, y_pred)
+    print("Classification Report:\n", report)
+
+    return clf
+
+# --- configuration ---
+time_col = "time_start"
+output_dir = "final_visualisations"
+
+# create folder if it doesn't exist
+os.makedirs(output_dir, exist_ok=True)
+
+# ensure time is numeric
+agg_df[time_col] = pd.to_numeric(agg_df[time_col], errors="coerce")
+
+# select columns to plot (exclude time)
+plot_cols = [
+    col for col in agg_df.columns
+    if col != time_col and pd.api.types.is_numeric_dtype(agg_df[col])
+]
+
+# --- plotting loop ---
+for col in plot_cols:
+    plt.figure()
+    plt.plot(agg_df[time_col], agg_df[col])
+    plt.xlabel("Time")
+    plt.ylabel(col)
+    plt.title(f"{col} vs Time")
+    plt.tight_layout()
+
+    filename = os.path.join(output_dir, f"{col}.png")
+    plt.savefig(filename, dpi=150)
+    plt.close()  # important: frees memory
+
+#train_random_forest(agg_df)
