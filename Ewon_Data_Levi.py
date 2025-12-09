@@ -5,7 +5,8 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.preprocessing import OrdinalEncoder
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import classification_report
-
+import os
+import matplotlib.pyplot as plt
 
 def concat_csv_files():
     try:
@@ -19,6 +20,10 @@ def concat_csv_files():
             print(path, df.shape)
             return df
         dfs = [load_csv(path) for path in csv_files]
+        # Standardize column names by prefixing with "StangData." and "StangHistorie[1]." if not already present
+        for df in dfs:
+            df.columns = ["StangData." + col if not col.startswith("StangData.") and col in ["Pos_inloCor_1_trek13", "Pos_inloCor_1_trek24", "Pos_inloCor_2_trek13", "Pos_inloCor_2_trek24", "Pos_uitloCor_1_trek13", "Pos_uitloCor_1_trek24", "Pos_uitloCor_2_trek13", "Pos-UitlolCor_2_trek24"] else col for col in df.columns]
+            df.columns = ["StangHistorie[1]." + col if col in ["BeginVerduningPosHor", "BeginVerduningPosVert", "EindVerduningPosHor", "EindVerduningPosVert","bgem","dgem"] else col for col in df.columns]
         combined = pd.concat(dfs, ignore_index=True)
         combined.to_feather("data/New_SVRM3_Ewon/combined.feather")
         return combined
@@ -66,7 +71,7 @@ def proto_shift_count(df, col, chunk_size):
     print(f"Number of shifts in '{col}' with chunk size {chunk_size}: {shift_count}")
     return shift_count
 
-proto_shift = proto_shift_count(df_clean, "afgekeurd", 100)
+#proto_shift = proto_shift_count(df_clean, "afgekeurd", 100)
 
 def shift_count_in_constant_flow(df, col, min_constant):
     shift_count = 0
@@ -84,45 +89,66 @@ def shift_count_in_constant_flow(df, col, min_constant):
     print(f"Number of shifts in '{col}' with constant flow ≥ {min_constant}: {shift_count}")
     return shift_count
 
-shift_count = shift_count_in_constant_flow(df_clean, "afgekeurd", 100)
+#shift_count = shift_count_in_constant_flow(df_clean, "afgekeurd", 100)
 
-df_clean = df_clean[pd.to_numeric(df_clean["afgekeurd"], errors='coerce').notna()].reset_index(drop=True)
-df_clean["afgekeurd"] = pd.to_numeric(df_clean["afgekeurd"], errors='coerce')
-df_clean["afgekeurd_next"] = df_clean["afgekeurd"].shift(-1)
-df_clean["will_shift"] = (df_clean["afgekeurd"] != df_clean["afgekeurd_next"]).astype(int)
+def visualize_all_columns(df, output_dir="new_visualisations"):
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Remove columns with only "Undef" values
+    cols_to_plot = [col for col in df.columns if not (df[col] == "Undef").all()]
+    
+    for col in cols_to_plot:
+        try:
+            fig, ax = plt.subplots(figsize=(12, 4))
+            ax.plot(pd.to_numeric(df[col], errors='coerce'))
+            ax.set_title(col)
+            ax.set_xlabel("Index")
+            plt.tight_layout()
+            plt.savefig(os.path.join(output_dir, f"{col}.png"))
+            plt.close()
+        except:
+            print(f"Cannot plot {col}")
+
+#visualize_all_columns(df_clean)
+
+def show_column_specs(df, column_name):
+    if column_name in df.columns:
+        unique_values = df[column_name].unique()
+        num_unique = len(unique_values)
+        data_type = df[column_name].dtype
+        print(f"Column: {column_name}")
+        print(f"Data Type: {data_type}")
+        print(f"Number of Unique Values: {num_unique}")
+        print(f"Unique Values: {unique_values}")
+    else:
+        print(f"Column '{column_name}' does not exist in the DataFrame.")
+
+show_column_specs(df_clean, "afgekeurd")
 
 
-train_size = int(len(df_clean) * 0.8)
-train = df_clean.iloc[:train_size]
-test = df_clean.iloc[train_size:]
+def calculate_max_min_slope(df):
+    include_cols_maybe = ["d_hor_offset","d_vert_offset,","StangData.Correctie_Totale_lengte","StangData.Correctie_Totale_lengte_operator_trek1en3",
+                    "StangData.Offset_knipklem_knippositie_Operator","StangData.Pos_inloCor_1_trek13","StangData.Pos_inloCor_1_trek24",
+                    "StangData.Pos_inloCor_2_trek13","StangData.Pos_inloCor_2_trek24","StangData.Pos_uitloCor_1_trek13", "StangData.Pos_uitloCor_1_trek24",
+                    "StangData.Pos_uitloCor_2_trek13","StangData.Pos-UitlolCor_2_trek24","VU-Center_hor","Wisselblok_settings[2].Wp1_diameter_offset",
+                    "Wisselblok_settings[2].Wp2_diameter_offset"]
+    include_cols = ["StangHistorie[1].BeginVerduningPosHor","StangHistorie[1].BeginVerdunningPos","StangHistorie[1].bgem","StangHistorie[1].dgem",
+                    "StangHistorie[1].EindVerduningPos","StangHistorie[1].EindVerduningPosHor","StangHistorie[1].L_v"]
+    
+    df["TimeInt"] = df["TimeInt"].apply(pd.to_numeric, errors="coerce")
+    df[include_cols] = df[include_cols].apply(pd.to_numeric, errors="coerce")
 
-X_train = train.drop(columns=["afgekeurd", "afgekeurd_next", "will_shift", "TimeInt", "TimeStr"])
-y_train = train["will_shift"]
+    dt = np.diff(df["TimeInt"].values)
+    dy = np.diff(df[include_cols].values, axis=0)
 
-X_test = test.drop(columns=["afgekeurd", "afgekeurd_next", "will_shift", "TimeInt", "TimeStr"])
-y_test = test["will_shift"]
-
-cat_cols = [col for col in X_train.columns if X_train[col].dtype == "object"]
-
-encoder = OrdinalEncoder(
-    handle_unknown="use_encoded_value",
-    unknown_value=-1
+    slopes = pd.DataFrame(
+        dy / dt[:, None],
+        columns=[f"{c}_slope" for c in include_cols],
+        index=df.index[1:]
 )
 
-for col in cat_cols:
-    X_train[col] = encoder.fit_transform(X_train[[col]])
-    X_test[col] = encoder.transform(X_test[[col]])
+    result = pd.concat([df[["TimeInt","afgekeurd"]],include_cols], axis=1)
 
-model = RandomForestClassifier(
-    n_estimators=300,
-    max_depth=20,
-    class_weight="balanced",
-    n_jobs=-1
-)
+    return result
 
-model.fit(X_train, y_train)
-pred = model.predict(X_test)
-print(classification_report(y_test, pred))
-
-fi = pd.Series(model.feature_importances_, index=X_train.columns)
-print("Top predictive features:\n", fi.sort_values(ascending=False).head(20))
+print(calculate_max_min_slope(df_clean))
