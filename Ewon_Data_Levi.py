@@ -1,12 +1,13 @@
 import numpy as np
 import pandas as pd
 import glob
-from sklearn.preprocessing import LabelEncoder
-from sklearn.preprocessing import OrdinalEncoder
+from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold, train_test_split
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import classification_report
+from sklearn.metrics import classification_report, precision_recall_curve, average_precision_score, roc_auc_score
+from sklearn.inspection import permutation_importance
 import os
 import matplotlib.pyplot as plt
+import shap
 
 def concat_csv_files():
     try:
@@ -156,97 +157,268 @@ slope_df = calculate_max_min_slope(df_clean)
 
 print(slope_df.columns)
 
-def create_final_df(df,window_size):
+def create_final_df(df, window_size):
     slope_cols = [col for col in df.columns if col.endswith("_slope")]
     agg_result = []
+
     for start in range(0, len(df) - window_size + 1, window_size):
         end = start + window_size
         window = df.iloc[start:end]
-        max_slopes = window.loc[:, slope_cols].max()
+
+        max_slopes = window[slope_cols].max()
+        min_slopes = window[slope_cols].min()
         sum_afgekeurd = window["afgekeurd_inc"].sum()
-        
-        # Optional: include group/time of first row
+
         row = {
             "time_start": window["TimeInt"].iloc[0],
             "time_end": window["TimeInt"].iloc[-1],
-            **max_slopes.to_dict(),
-            "sum_afgekeurd": sum_afgekeurd
+            "sum_afgekeurd": max(sum_afgekeurd, 0)  # already cleaned
         }
+
+        # Add max/min slopes
+        for col in slope_cols:
+            base = col.replace("_slope", "")
+            row[f"{base}_max_slope"] = max_slopes[col]
+            row[f"{base}_min_slope"] = min_slopes[col]
+            # Optional: range feature
+            row[f"{base}_range"] = max_slopes[col] - min_slopes[col]
+
         agg_result.append(row)
 
     agg_df = pd.DataFrame(agg_result)
+
+    # --- Integrate future_event target directly ---
+    agg_df["future_event"] = agg_df["sum_afgekeurd"].shift(-1).fillna(0).gt(0).astype(int)
+
     return agg_df
 
-agg_df = create_final_df(slope_df,100)
-agg_df.loc[agg_df["sum_afgekeurd"] <= 0, "sum_afgekeurd"] = 0
+agg_df = create_final_df(slope_df, 15)
+print(agg_df.head())
+print(agg_df["future_event"].value_counts())
+
 
 #slope_df.to_excel("data/New_SVRM3_Ewon/slope_analysis.xlsx", index=False)
-
-print(agg_df)
-
 show_column_specs(agg_df, "sum_afgekeurd")
 
-plt.figure()
-plt.plot(agg_df["time_start"], agg_df["sum_afgekeurd"])
-plt.xlabel("Time")
-plt.ylabel("Extra sum")
-plt.title("Extra sum per window")
-plt.show()
+def plot_min_max_slopes_vs_time(df, output_dir="slope_visualizations"):
+    os.makedirs(output_dir, exist_ok=True)
 
+    # Detect base feature names
+    max_cols = [c for c in df.columns if c.endswith("_max_slope")]
 
-def train_random_forest(df):
+    for max_col in max_cols:
+        base = max_col.replace("_max_slope", "")
+        min_col = f"{base}_min_slope"
+
+        if min_col not in df.columns:
+            continue
+
+        plt.figure(figsize=(12, 4))
+        plt.plot(df["time_start"], df[max_col], label="Max slope")
+        plt.plot(df["time_start"], df[min_col], label="Min slope")
+
+        plt.xlabel("Time start")
+        plt.ylabel("Slope")
+        plt.title(f"Min / Max slope vs time — {base}")
+        plt.legend()
+        plt.tight_layout()
+
+        plt.savefig(os.path.join(output_dir, f"{base}_min_max_slope.png"))
+        plt.close()
+
+def explain_random_forest(best_rf, X_test, top_n=10):
+    import shap
+    import numpy as np
+    import pandas as pd
+
+    # Create SHAP explainer
+    explainer = shap.TreeExplainer(best_rf)
+    shap_values = explainer.shap_values(X_test)
+
+    # For binary classification, pick class 1
+    if isinstance(shap_values, list):
+        shap_class1 = shap_values[1]  # shape = (n_samples, n_features)
+    else:
+        shap_class1 = shap_values
+
+    # Ensure it's 2D
+    if shap_class1.ndim != 2:
+        shap_class1 = shap_class1.reshape(X_test.shape[0], -1)
+
+    # Make sure the number of columns matches X_test
+    shap_class1 = shap_class1[:, :X_test.shape[1]]
+
+    # Compute mean absolute and mean SHAP values
+    mean_abs_shap = np.abs(shap_class1).mean(axis=0)
+    shap_mean = shap_class1.mean(axis=0)
+
+    # Now feature names match number of columns
+    feature_cols = X_test.columns[:shap_class1.shape[1]]
+
+    # Construct DataFrame safely
+    mean_shap = pd.DataFrame({
+        'feature': feature_cols,
+        'mean_abs_shap': mean_abs_shap,
+        'shap_mean': shap_mean
+    }).sort_values(by='mean_abs_shap', ascending=False)
+
+    top_features = mean_shap.head(top_n)
+    conclusions = []
+
+    print("\n--- Automatic Feature Conclusions ---\n")
+    for idx, row in top_features.iterrows():
+        feature = row['feature']
+        direction = "increase" if row['shap_mean'] > 0 else "decrease"
+        prob_change = abs(row['shap_mean'])
+        conclusion = f"High values of '{feature}' tend to {direction} the likelihood of a future event (avg SHAP impact ≈ {prob_change:.4f})"
+        conclusions.append(conclusion)
+        print(conclusion)
+
+    # Optional SHAP summary plot
+    shap.summary_plot(shap_class1, X_test, plot_type="bar", show=False)
+
+    return conclusions
+
+def train_random_forest(df, use_cv=True, manual_params=None, n_iter_search=20, use_shap=True, top_n_shap=10):
+    """
+    Train a Random Forest on the given dataframe with options for hyperparameter tuning or manual parameters,
+    including SHAP-based feature conclusions.
+    
+    Parameters:
+    - df: DataFrame with features ending in "_slope" and target "future_event"
+    - use_cv: bool, whether to use RandomizedSearchCV to find optimal hyperparameters
+    - manual_params: dict of RandomForestClassifier parameters (used if use_cv=False)
+    - n_iter_search: int, number of iterations for RandomizedSearchCV
+    - use_shap: bool, whether to compute SHAP explanations
+    - top_n_shap: int, number of top features to report via SHAP
+    """
+
     feature_cols = [col for col in df.columns if col.endswith("_slope")]
     X = df[feature_cols]
-    y = df["sum_afgekeurd"]
+    y = df["future_event"]
 
-    # Encode target variable
-    y_encoded = LabelEncoder().fit_transform(y)
-
-    # Split data into training and testing sets
+    # Split into training and testing
     split_index = int(0.8 * len(df))
     X_train, X_test = X.iloc[:split_index], X.iloc[split_index:]
-    y_train, y_test = y_encoded[:split_index], y_encoded[split_index:]
+    y_train, y_test = y.iloc[:split_index], y.iloc[split_index:]
 
-    # Train Random Forest Classifier
-    clf = RandomForestClassifier(n_estimators=100, random_state=42)
-    clf.fit(X_train, y_train)
+    if use_cv:
+        # Hyperparameter distribution
+        param_dist = {
+            'n_estimators': [200, 500, 800, 1000],
+            'max_depth': [None, 10, 20, 30],
+            'min_samples_split': [2, 5, 10],
+            'min_samples_leaf': [1, 3, 5],
+            'max_features': ['sqrt', 'log2'],
+            'class_weight': ['balanced']
+        }
 
-    # Make predictions
-    y_pred = clf.predict(X_test)
+        # Base Random Forest
+        rf = RandomForestClassifier(random_state=42, n_jobs=-1)
 
-    # Evaluate the model
-    report = classification_report(y_test, y_pred)
-    print("Classification Report:\n", report)
+        # Stratified CV for rare events
+        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
-    return clf
+        # Randomized Search CV
+        rand_search = RandomizedSearchCV(
+            estimator=rf,
+            param_distributions=param_dist,
+            n_iter=n_iter_search,
+            scoring='average_precision',  # PR-AUC for rare events
+            cv=cv,
+            n_jobs=-1,
+            random_state=42,
+            verbose=2
+        )
 
-# --- configuration ---
-time_col = "time_start"
-output_dir = "final_visualisations"
+        # Fit Randomized Search
+        rand_search.fit(X_train, y_train)
+        print("Best hyperparameters:", rand_search.best_params_)
+        print("Best PR-AUC (CV):", rand_search.best_score_)
 
-# create folder if it doesn't exist
-os.makedirs(output_dir, exist_ok=True)
+        best_rf = rand_search.best_estimator_
 
-# ensure time is numeric
-agg_df[time_col] = pd.to_numeric(agg_df[time_col], errors="coerce")
+    else:
+        # Use manual parameters
+        if manual_params is None:
+            manual_params = {
+                'n_estimators': 500,
+                'max_depth': 30,
+                'min_samples_split': 10,
+                'min_samples_leaf': 3,
+                'max_features': 'sqrt',
+                'class_weight': 'balanced',
+                'random_state': 42,
+                'n_jobs': -1
+            }
+        best_rf = RandomForestClassifier(**manual_params)
+        best_rf.fit(X_train, y_train)
+        print("Random Forest trained with manual parameters:", manual_params)
 
-# select columns to plot (exclude time)
-plot_cols = [
-    col for col in agg_df.columns
-    if col != time_col and pd.api.types.is_numeric_dtype(agg_df[col])
-]
+    # Permutation importance
+    perm = permutation_importance(best_rf, X_test, y_test, n_repeats=20, random_state=42, n_jobs=-1)
+    perm_importance = pd.Series(perm.importances_mean, index=X_test.columns).sort_values(ascending=False)
+    print("\nTop 15 feature importances (permutation importance):")
+    print(perm_importance.head(15))
 
-# --- plotting loop ---
-for col in plot_cols:
-    plt.figure()
-    plt.plot(agg_df[time_col], agg_df[col])
-    plt.xlabel("Time")
-    plt.ylabel(col)
-    plt.title(f"{col} vs Time")
-    plt.tight_layout()
+    # PR-AUC / ROC-AUC evaluation
+    y_proba = best_rf.predict_proba(X_test)[:,1]
+    print("\nModel Evaluation:")
+    print("PR-AUC :", average_precision_score(y_test, y_proba))
+    print("ROC-AUC:", roc_auc_score(y_test, y_proba))
 
-    filename = os.path.join(output_dir, f"{col}.png")
-    plt.savefig(filename, dpi=150)
-    plt.close()  # important: frees memory
+    # SHAP explanations
+    if use_shap:
+        print("\nGenerating SHAP-based feature conclusions...")
+        top_conclusions = explain_random_forest(best_rf, X_test, top_n=top_n_shap)
+    else:
+        top_conclusions = []
 
-#train_random_forest(agg_df)
+    return best_rf, top_conclusions
+
+train_random_forest(agg_df, use_cv=False, n_iter_search=20, use_shap=True, top_n_shap=10)
+
+def evaluate_window_sizes(slope_df, window_sizes):
+    pr_aucs = []
+
+    for w in window_sizes:
+        print(f"Evaluating window size: {w}")
+        # Aggregate slopes into windows
+        agg_df = create_final_df(slope_df, w)
+        agg_df.loc[agg_df["sum_afgekeurd"] <= 0, "sum_afgekeurd"] = 0
+        agg_df["future_event"] = agg_df["sum_afgekeurd"].shift(-1).fillna(0).gt(0).astype(int)
+
+        feature_cols = [col for col in agg_df.columns if col.endswith("_slope")]
+        X = agg_df[feature_cols]
+        y = agg_df["future_event"]
+
+        # Split train/test
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42, stratify=y
+        )
+
+        # Train a small Random Forest (faster) for evaluation
+        clf = RandomForestClassifier(
+            n_estimators=200,
+            max_depth=None,
+            class_weight="balanced",
+            random_state=42,
+            n_jobs=-1
+        )
+        clf.fit(X_train, y_train)
+
+        # Predict probabilities for PR-AUC
+        y_proba = clf.predict_proba(X_test)[:,1]
+        pr_auc = average_precision_score(y_test, y_proba)
+        pr_aucs.append(pr_auc)
+
+    # Plot PR-AUC vs window size
+    plt.figure(figsize=(10,5))
+    plt.plot(window_sizes, pr_aucs, marker='o')
+    plt.xlabel("Window size")
+    plt.ylabel("PR-AUC")
+    plt.title("PR-AUC vs Window Size")
+    plt.grid(True)
+    plt.show()
+
+#evaluate_window_sizes(slope_df, window_sizes=[10, 15, 20, 25, 30, 40, 50], n_iter_search=5)
