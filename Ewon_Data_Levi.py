@@ -8,12 +8,11 @@ from sklearn.inspection import permutation_importance
 import os
 import matplotlib.pyplot as plt
 import shap
-
 import glob
 import pandas as pd
 import os
 
-def concat_csv_files(svrm_version="svrm3"):
+def concat_csv_files(svrm_version):
     """
     svrm_version: "svrm3" or "svrm4"
     """
@@ -88,7 +87,7 @@ def create_afgekeurd_column(df,
 
     return df
 
-def build_feature_table(df, window_size=15):
+def build_feature_table(df, window_size):
     """
     Full feature engineering pipeline:
     - clean data
@@ -257,9 +256,9 @@ def train_random_forest(df, use_cv=True, manual_params=None, n_iter_search=20, u
         if manual_params is None:
             manual_params = {
                 'n_estimators': 500,
-                'max_depth': None,
+                'max_depth': 30,
                 'min_samples_split': 10,
-                'min_samples_leaf': 5,
+                'min_samples_leaf': 3,
                 'max_features': 'sqrt',
                 'class_weight': 'balanced',
                 'random_state': 42,
@@ -370,7 +369,7 @@ def show_column_specs(df, column_name):
     else:
         print(f"Column '{column_name}' does not exist in the DataFrame.")
 
-def plot_min_max_slopes_vs_time(df, output_dir="slope_visualizations_svrm4"):
+def plot_min_max_slopes_vs_time(df, output_dir="slope_visualizations_svrm3"):
     os.makedirs(output_dir, exist_ok=True)
 
     # Detect base feature names
@@ -440,13 +439,16 @@ def evaluate_window_sizes(df, window_sizes):
     plt.show()
 
 svrm_3_data = concat_csv_files(svrm_version="svrm3")
-svrm_4_data = concat_csv_files(svrm_version="svrm4")
-svrm_4_data = create_afgekeurd_column(svrm_4_data)
-#svrm_3_df = build_feature_table(svrm_3_data, 15)
-#svrm_4_df = build_feature_table(svrm_4_data, 30)
+svrm_3_df = build_feature_table(svrm_3_data, 15)
+train_random_forest(svrm_3_df, use_cv=False, n_iter_search=20, use_shap=True, top_n_shap=10)
+plot_min_max_slopes_vs_time(svrm_3_df)
 
-show_column_specs(svrm_4_data, "afgekeurd")
-#train_random_forest(svrm_4_df, use_cv=False, n_iter_search=20, use_shap=True, top_n_shap=10)
+#svrm_4_df = build_feature_table(svrm_4_data, 30)
+#svrm_4_data = concat_csv_files(svrm_version="svrm4")
+#svrm_4_data = create_afgekeurd_column(svrm_4_data)
+
+
+
 
 # Optimal parameters found for SVRM 3 with 15 window size:
     # 'n_estimators': 500,
