@@ -9,138 +9,138 @@ import os
 import matplotlib.pyplot as plt
 import shap
 
-def concat_csv_files():
+import glob
+import pandas as pd
+import os
+
+def concat_csv_files(svrm_version="svrm3"):
+    """
+    svrm_version: "svrm3" or "svrm4"
+    """
+
+    svrm_version = svrm_version.lower()
+    if svrm_version not in ["svrm3", "svrm4"]:
+        raise ValueError("svrm_version must be 'svrm3' or 'svrm4'")
+
+    base_path = f"data/New_{svrm_version.upper()}_Ewon"
+    feather_path = os.path.join(base_path, "combined.feather")
+
     try:
-        existing = pd.read_feather("data/New_SVRM3_Ewon/combined.feather")
+        existing = pd.read_feather(feather_path)
         return existing
-    
-    except:
-        csv_files = glob.glob("data/New_SVRM3_Ewon/*.csv")
+
+    except FileNotFoundError:
+        csv_files = glob.glob(os.path.join(base_path, "*.csv"))
+
         def load_csv(path):
-            df = pd.read_csv(path, sep=";",dtype=str)
+            df = pd.read_csv(path, sep=";", dtype=str)
             print(path, df.shape)
             return df
+
         dfs = [load_csv(path) for path in csv_files]
-        # Standardize column names by prefixing with "StangData." and "StangHistorie[1]." if not already present
+
+        # Columns to standardize
+        stangdata_cols = [
+            "Pos_inloCor_1_trek13", "Pos_inloCor_1_trek24",
+            "Pos_inloCor_2_trek13", "Pos_inloCor_2_trek24",
+            "Pos_uitloCor_1_trek13", "Pos_uitloCor_1_trek24",
+            "Pos_uitloCor_2_trek13", "Pos-UitlolCor_2_trek24"
+        ]
+
+        stanghistorie_cols = [
+            "BeginVerduningPosHor", "BeginVerduningPosVert",
+            "EindVerduningPosHor", "EindVerduningPosVert",
+            "bgem", "dgem"
+        ]
+
         for df in dfs:
-            df.columns = ["StangData." + col if not col.startswith("StangData.") and col in ["Pos_inloCor_1_trek13", "Pos_inloCor_1_trek24", "Pos_inloCor_2_trek13", "Pos_inloCor_2_trek24", "Pos_uitloCor_1_trek13", "Pos_uitloCor_1_trek24", "Pos_uitloCor_2_trek13", "Pos-UitlolCor_2_trek24"] else col for col in df.columns]
-            df.columns = ["StangHistorie[1]." + col if col in ["BeginVerduningPosHor", "BeginVerduningPosVert", "EindVerduningPosHor", "EindVerduningPosVert","bgem","dgem"] else col for col in df.columns]
+            df.columns = [
+                "StangData." + col
+                if col in stangdata_cols and not col.startswith("StangData.")
+                else col
+                for col in df.columns
+            ]
+
+            df.columns = [
+                "StangHistorie[1]." + col
+                if col in stanghistorie_cols and not col.startswith("StangHistorie[1].")
+                else col
+                for col in df.columns
+            ]
+
         combined = pd.concat(dfs, ignore_index=True)
-        combined.to_feather("data/New_SVRM3_Ewon/combined.feather")
+        combined.to_feather(feather_path)
+
         return combined
 
-combined_df = concat_csv_files()
+def create_afgekeurd_column(df,
+                            knipteller_col="knipteller",
+                            goedgekeurd_col="goedgekeurd",
+                            afgekeurd_col="afgekeurd"):
+    df = df.copy()
 
-csv_file = glob.glob("data/New_SVRM3_Ewon/20251114 SVRM3_HisLog12.csv")
-random_df = [pd.read_csv(path,sep=";") for path in csv_file]
+    # Zet kolommen om naar numeriek, ongeldige waarden worden 0
+    df[knipteller_col] = pd.to_numeric(df[knipteller_col], errors='coerce').fillna(0)
+    df[goedgekeurd_col] = pd.to_numeric(df[goedgekeurd_col], errors='coerce').fillna(0)
 
-# for col in combined_df.columns:
-#     if col not in random_df[0].columns:
-#         print(col)
+    # Totale afgekeurd = knipteller - goedgekeurd
+    df[afgekeurd_col] = (df[knipteller_col] - df[goedgekeurd_col]).clip(lower=0)
 
-def percentage_undef_empty(df, column):
-    count_undef = (df[column] == "Undef").sum()
-    percentage_undef = (count_undef / len(df)) * 100
+    return df
 
-    count_empty = df[column].isna().sum()
-    percentage_empty = (count_empty / len(df)) * 100
+def build_feature_table(df, window_size=15):
+    """
+    Full feature engineering pipeline:
+    - clean data
+    - compute slopes
+    - aggregate into windows
+    - create future_event target
 
-    return percentage_undef, percentage_empty
+    Returns:
+        agg_df (pd.DataFrame)
+    """
 
-percentage_undef, percentage_empty = percentage_undef_empty(combined_df, "afgekeurd")
+    # -----------------------------
+    # 1. CLEAN
+    # -----------------------------
+    df = (
+        df.sort_values("TimeInt")
+          .drop_duplicates(subset="TimeInt", keep="first")
+          .reset_index(drop=True)
+    )
+    df = df[df["afgekeurd"] != "Undef"].reset_index(drop=True)
 
-def clean_df(df):
-    df_sorted = df.sort_values("TimeInt").drop_duplicates(subset="TimeInt",keep="first").reset_index(drop=True)
-    df_clean = df_sorted[df_sorted["afgekeurd"] != "Undef"].reset_index(drop=True)
-    return df_clean
-
-df_clean = clean_df(combined_df)
-
-def proto_shift_count(df, col, chunk_size):
-    shift_count = 0
-    previous_value = None
-
-    for i in range(0, len(df), chunk_size):
-        chunk = df.iloc[i:i+chunk_size]
-        most_frequent = chunk[col].mode()[0]  # Get the most frequent value in the chunk
-
-        if previous_value is not None and most_frequent != previous_value:
-            shift_count += 1
-
-        previous_value = most_frequent
-
-    print(f"Number of shifts in '{col}' with chunk size {chunk_size}: {shift_count}")
-    return shift_count
-
-#proto_shift = proto_shift_count(df_clean, "afgekeurd", 100)
-
-def shift_count_in_constant_flow(df, col, min_constant):
-    shift_count = 0
-    current_value = None
-    current_length = 0
-
-    for val in df[col]:
-        if val == current_value:
-            current_length += 1
-        else:
-            if current_length >= min_constant:
-                shift_count += 1
-            current_value = val
-            current_length = 1
-    print(f"Number of shifts in '{col}' with constant flow ≥ {min_constant}: {shift_count}")
-    return shift_count
-
-#shift_count = shift_count_in_constant_flow(df_clean, "afgekeurd", 100)
-
-def visualize_all_columns(df, output_dir="new_visualisations"):
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Remove columns with only "Undef" values
-    cols_to_plot = [col for col in df.columns if not (df[col] == "Undef").all()]
-    
-    for col in cols_to_plot:
-        try:
-            fig, ax = plt.subplots(figsize=(12, 4))
-            ax.plot(pd.to_numeric(df[col], errors='coerce'))
-            ax.set_title(col)
-            ax.set_xlabel("Index")
-            plt.tight_layout()
-            plt.savefig(os.path.join(output_dir, f"{col}.png"))
-            plt.close()
-        except:
-            print(f"Cannot plot {col}")
-
-#visualize_all_columns(df_clean)
-
-def show_column_specs(df, column_name):
-    if column_name in df.columns:
-        unique_values = df[column_name].unique()
-        num_unique = len(unique_values)
-        data_type = df[column_name].dtype
-        print(f"Column: {column_name}")
-        print(f"Data Type: {data_type}")
-        print(f"Number of Unique Values: {num_unique}")
-        print(f"Unique Values: {unique_values}")
-    else:
-        print(f"Column '{column_name}' does not exist in the DataFrame.")
-
-#show_column_specs(df_clean, "afgekeurd")
-
-
-def calculate_max_min_slope(df):
+    # -----------------------------
+    # 2. PREPARE NUMERIC COLUMNS
+    # -----------------------------
     df["afgekeurd"] = pd.to_numeric(df["afgekeurd"], errors="coerce")
     df["afgekeurd_inc"] = df["afgekeurd"].diff().fillna(0)
-    include_cols_maybe = ["d_hor_offset","d_vert_offset,","StangData.Correctie_Totale_lengte","StangData.Correctie_Totale_lengte_operator_trek1en3",
-                    "StangData.Offset_knipklem_knippositie_Operator","StangData.Pos_inloCor_1_trek13","StangData.Pos_inloCor_1_trek24",
-                    "StangData.Pos_inloCor_2_trek13","StangData.Pos_inloCor_2_trek24","StangData.Pos_uitloCor_1_trek13", "StangData.Pos_uitloCor_1_trek24",
-                    "StangData.Pos_uitloCor_2_trek13","StangData.Pos-UitlolCor_2_trek24","VU-Center_hor","Wisselblok_settings[2].Wp1_diameter_offset",
-                    "Wisselblok_settings[2].Wp2_diameter_offset"]
-    include_cols = ["StangHistorie[1].BeginVerduningPosHor","StangHistorie[1].BeginVerdunningPos","StangHistorie[1].bgem","StangHistorie[1].dgem",
-                    "StangHistorie[1].EindVerduningPos","StangHistorie[1].EindVerduningPosHor","StangHistorie[1].L_v"]
-    
-    df["TimeInt"] = df["TimeInt"].apply(pd.to_numeric, errors="coerce")
+
+    desired_cols_mapping = {
+        "StangHistorie[1].BeginVerduningPosHor": ["StangHistorie[1].BeginVerduningPosHor"],
+        "StangHistorie[1].BeginVerdunningPos": ["StangHistorie[1].BeginVerdunningPos"],
+        "StangHistorie[1].bgem": ["StangHistorie[1].bgem", "StangHistorie[1].b_gem"],
+        "StangHistorie[1].dgem": ["StangHistorie[1].dgem", "StangHistorie[1].d_gem"],
+        "StangHistorie[1].EindVerduningPos": ["StangHistorie[1].EindVerduningPos"],
+        "StangHistorie[1].EindVerduningPosHor": ["StangHistorie[1].EindVerduningPosHor"],
+        "StangHistorie[1].L_v": ["StangHistorie[1].L_v"],
+    }
+
+    include_cols = []
+
+    for alternatives in desired_cols_mapping.values():
+        for col in alternatives:
+            if col in df.columns:
+                include_cols.append(col)
+                break
+
+    df["TimeInt"] = pd.to_numeric(df["TimeInt"], errors="coerce")
+
     df[include_cols] = df[include_cols].apply(pd.to_numeric, errors="coerce")
 
+    # -----------------------------
+    # 3. SLOPE CALCULATION
+    # -----------------------------
     dt = np.diff(df["TimeInt"].values)
     dy = np.diff(df[include_cols].values, axis=0)
 
@@ -148,136 +148,50 @@ def calculate_max_min_slope(df):
         dy / dt[:, None],
         columns=[f"{c}_slope" for c in include_cols],
         index=df.index[1:]
-)
-    result = pd.concat([df[["TimeInt","afgekeurd_inc"] + include_cols],slopes], axis=1)
+    )
 
-    return result
+    slope_df = pd.concat(
+        [df.loc[df.index[1:], ["TimeInt", "afgekeurd_inc"] + include_cols], slopes],
+        axis=1
+    )
 
-slope_df = calculate_max_min_slope(df_clean)
+    # -----------------------------
+    # 4. WINDOW AGGREGATION
+    # -----------------------------
+    slope_cols = [c for c in slope_df.columns if c.endswith("_slope")]
+    agg_rows = []
 
-print(slope_df.columns)
-
-def create_final_df(df, window_size):
-    slope_cols = [col for col in df.columns if col.endswith("_slope")]
-    agg_result = []
-
-    for start in range(0, len(df) - window_size + 1, window_size):
-        end = start + window_size
-        window = df.iloc[start:end]
-
-        max_slopes = window[slope_cols].max()
-        min_slopes = window[slope_cols].min()
-        sum_afgekeurd = window["afgekeurd_inc"].sum()
+    for start in range(0, len(slope_df) - window_size + 1, window_size):
+        window = slope_df.iloc[start:start + window_size]
 
         row = {
             "time_start": window["TimeInt"].iloc[0],
             "time_end": window["TimeInt"].iloc[-1],
-            "sum_afgekeurd": max(sum_afgekeurd, 0)  # already cleaned
+            "sum_afgekeurd": max(window["afgekeurd_inc"].sum(), 0),
         }
 
-        # Add max/min slopes
         for col in slope_cols:
             base = col.replace("_slope", "")
-            row[f"{base}_max_slope"] = max_slopes[col]
-            row[f"{base}_min_slope"] = min_slopes[col]
-            # Optional: range feature
-            row[f"{base}_range"] = max_slopes[col] - min_slopes[col]
+            row[f"{base}_max_slope"] = window[col].max()
+            row[f"{base}_min_slope"] = window[col].min()
+            row[f"{base}_range"] = window[col].max() - window[col].min()
 
-        agg_result.append(row)
+        agg_rows.append(row)
 
-    agg_df = pd.DataFrame(agg_result)
+    agg_df = pd.DataFrame(agg_rows)
 
-    # --- Integrate future_event target directly ---
-    agg_df["future_event"] = agg_df["sum_afgekeurd"].shift(-1).fillna(0).gt(0).astype(int)
+    # -----------------------------
+    # 5. TARGET
+    # -----------------------------
+    agg_df["future_event"] = (
+        agg_df["sum_afgekeurd"]
+        .shift(-1)
+        .fillna(0)
+        .gt(0)
+        .astype(int)
+    )
 
     return agg_df
-
-agg_df = create_final_df(slope_df, 15)
-print(agg_df.head())
-print(agg_df["future_event"].value_counts())
-
-
-#slope_df.to_excel("data/New_SVRM3_Ewon/slope_analysis.xlsx", index=False)
-show_column_specs(agg_df, "sum_afgekeurd")
-
-def plot_min_max_slopes_vs_time(df, output_dir="slope_visualizations"):
-    os.makedirs(output_dir, exist_ok=True)
-
-    # Detect base feature names
-    max_cols = [c for c in df.columns if c.endswith("_max_slope")]
-
-    for max_col in max_cols:
-        base = max_col.replace("_max_slope", "")
-        min_col = f"{base}_min_slope"
-
-        if min_col not in df.columns:
-            continue
-
-        plt.figure(figsize=(12, 4))
-        plt.plot(df["time_start"], df[max_col], label="Max slope")
-        plt.plot(df["time_start"], df[min_col], label="Min slope")
-
-        plt.xlabel("Time start")
-        plt.ylabel("Slope")
-        plt.title(f"Min / Max slope vs time — {base}")
-        plt.legend()
-        plt.tight_layout()
-
-        plt.savefig(os.path.join(output_dir, f"{base}_min_max_slope.png"))
-        plt.close()
-
-def explain_random_forest(best_rf, X_test, top_n=10):
-    import shap
-    import numpy as np
-    import pandas as pd
-
-    # Create SHAP explainer
-    explainer = shap.TreeExplainer(best_rf)
-    shap_values = explainer.shap_values(X_test)
-
-    # For binary classification, pick class 1
-    if isinstance(shap_values, list):
-        shap_class1 = shap_values[1]  # shape = (n_samples, n_features)
-    else:
-        shap_class1 = shap_values
-
-    # Ensure it's 2D
-    if shap_class1.ndim != 2:
-        shap_class1 = shap_class1.reshape(X_test.shape[0], -1)
-
-    # Make sure the number of columns matches X_test
-    shap_class1 = shap_class1[:, :X_test.shape[1]]
-
-    # Compute mean absolute and mean SHAP values
-    mean_abs_shap = np.abs(shap_class1).mean(axis=0)
-    shap_mean = shap_class1.mean(axis=0)
-
-    # Now feature names match number of columns
-    feature_cols = X_test.columns[:shap_class1.shape[1]]
-
-    # Construct DataFrame safely
-    mean_shap = pd.DataFrame({
-        'feature': feature_cols,
-        'mean_abs_shap': mean_abs_shap,
-        'shap_mean': shap_mean
-    }).sort_values(by='mean_abs_shap', ascending=False)
-
-    top_features = mean_shap.head(top_n)
-    conclusions = []
-
-    print("\n--- Automatic Feature Conclusions ---\n")
-    for idx, row in top_features.iterrows():
-        feature = row['feature']
-        direction = "increase" if row['shap_mean'] > 0 else "decrease"
-        prob_change = abs(row['shap_mean'])
-        conclusion = f"High values of '{feature}' tend to {direction} the likelihood of a future event (avg SHAP impact ≈ {prob_change:.4f})"
-        conclusions.append(conclusion)
-        print(conclusion)
-
-    # Optional SHAP summary plot
-    shap.summary_plot(shap_class1, X_test, plot_type="bar", show=False)
-
-    return conclusions
 
 def train_random_forest(df, use_cv=True, manual_params=None, n_iter_search=20, use_shap=True, top_n_shap=10):
     """
@@ -343,9 +257,9 @@ def train_random_forest(df, use_cv=True, manual_params=None, n_iter_search=20, u
         if manual_params is None:
             manual_params = {
                 'n_estimators': 500,
-                'max_depth': 30,
+                'max_depth': None,
                 'min_samples_split': 10,
-                'min_samples_leaf': 3,
+                'min_samples_leaf': 5,
                 'max_features': 'sqrt',
                 'class_weight': 'balanced',
                 'random_state': 42,
@@ -376,15 +290,119 @@ def train_random_forest(df, use_cv=True, manual_params=None, n_iter_search=20, u
 
     return best_rf, top_conclusions
 
-train_random_forest(agg_df, use_cv=False, n_iter_search=20, use_shap=True, top_n_shap=10)
+def explain_random_forest(best_rf, X_test, top_n=10):
 
-def evaluate_window_sizes(slope_df, window_sizes):
+    # Create SHAP explainer
+    explainer = shap.TreeExplainer(best_rf)
+    shap_values = explainer.shap_values(X_test)
+
+    # For binary classification, pick class 1
+    if isinstance(shap_values, list):
+        shap_class1 = shap_values[1]  # shape = (n_samples, n_features)
+    else:
+        shap_class1 = shap_values
+
+    # Ensure it's 2D
+    if shap_class1.ndim != 2:
+        shap_class1 = shap_class1.reshape(X_test.shape[0], -1)
+
+    # Make sure the number of columns matches X_test
+    shap_class1 = shap_class1[:, :X_test.shape[1]]
+
+    # Compute mean absolute and mean SHAP values
+    mean_abs_shap = np.abs(shap_class1).mean(axis=0)
+    shap_mean = shap_class1.mean(axis=0)
+
+    # Now feature names match number of columns
+    feature_cols = X_test.columns[:shap_class1.shape[1]]
+
+    # Construct DataFrame safely
+    mean_shap = pd.DataFrame({
+        'feature': feature_cols,
+        'mean_abs_shap': mean_abs_shap,
+        'shap_mean': shap_mean
+    }).sort_values(by='mean_abs_shap', ascending=False)
+
+    top_features = mean_shap.head(top_n)
+    conclusions = []
+
+    print("\n--- Automatic Feature Conclusions ---\n")
+    for idx, row in top_features.iterrows():
+        feature = row['feature']
+        direction = "increase" if row['shap_mean'] > 0 else "decrease"
+        prob_change = abs(row['shap_mean'])
+        conclusion = f"High values of '{feature}' tend to {direction} the likelihood of a future event (avg SHAP impact ≈ {prob_change:.4f})"
+        conclusions.append(conclusion)
+        print(conclusion)
+
+    # Optional SHAP summary plot
+    shap.summary_plot(shap_class1, X_test, plot_type="bar", show=False)
+
+    return conclusions
+
+def visualize_all_columns(df, output_dir="visualisations_svrm3"):
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Remove columns with only "Undef" values
+    cols_to_plot = [col for col in df.columns if not (df[col] == "Undef").all()]
+    
+    for col in cols_to_plot:
+        try:
+            fig, ax = plt.subplots(figsize=(12, 4))
+            ax.plot(pd.to_numeric(df[col], errors='coerce'))
+            ax.set_title(col)
+            ax.set_xlabel("Index")
+            plt.tight_layout()
+            plt.savefig(os.path.join(output_dir, f"{col}.png"))
+            plt.close()
+        except:
+            print(f"Cannot plot {col}")
+
+def show_column_specs(df, column_name):
+    if column_name in df.columns:
+        unique_values = df[column_name].unique()
+        num_unique = len(unique_values)
+        data_type = df[column_name].dtype
+        print(f"Column: {column_name}")
+        print(f"Data Type: {data_type}")
+        print(f"Number of Unique Values: {num_unique}")
+        print(f"Unique Values: {unique_values}")
+    else:
+        print(f"Column '{column_name}' does not exist in the DataFrame.")
+
+def plot_min_max_slopes_vs_time(df, output_dir="slope_visualizations_svrm4"):
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Detect base feature names
+    max_cols = [c for c in df.columns if c.endswith("_max_slope")]
+
+    for max_col in max_cols:
+        base = max_col.replace("_max_slope", "")
+        min_col = f"{base}_min_slope"
+
+        if min_col not in df.columns:
+            continue
+
+        plt.figure(figsize=(12, 4))
+        plt.plot(df["time_start"], df[max_col], label="Max slope")
+        plt.plot(df["time_start"], df[min_col], label="Min slope")
+
+        plt.xlabel("Time start")
+        plt.ylabel("Slope")
+        plt.title(f"Min / Max slope vs time — {base}")
+        plt.legend()
+        plt.tight_layout()
+
+        plt.savefig(os.path.join(output_dir, f"{base}_min_max_slope.png"))
+        plt.close()
+
+def evaluate_window_sizes(df, window_sizes):
     pr_aucs = []
 
     for w in window_sizes:
         print(f"Evaluating window size: {w}")
         # Aggregate slopes into windows
-        agg_df = create_final_df(slope_df, w)
+        agg_df = build_feature_table(df, w)
         agg_df.loc[agg_df["sum_afgekeurd"] <= 0, "sum_afgekeurd"] = 0
         agg_df["future_event"] = agg_df["sum_afgekeurd"].shift(-1).fillna(0).gt(0).astype(int)
 
@@ -421,4 +439,31 @@ def evaluate_window_sizes(slope_df, window_sizes):
     plt.grid(True)
     plt.show()
 
-#evaluate_window_sizes(slope_df, window_sizes=[10, 15, 20, 25, 30, 40, 50], n_iter_search=5)
+svrm_3_data = concat_csv_files(svrm_version="svrm3")
+svrm_4_data = concat_csv_files(svrm_version="svrm4")
+svrm_4_data = create_afgekeurd_column(svrm_4_data)
+#svrm_3_df = build_feature_table(svrm_3_data, 15)
+#svrm_4_df = build_feature_table(svrm_4_data, 30)
+
+show_column_specs(svrm_4_data, "afgekeurd")
+#train_random_forest(svrm_4_df, use_cv=False, n_iter_search=20, use_shap=True, top_n_shap=10)
+
+# Optimal parameters found for SVRM 3 with 15 window size:
+    # 'n_estimators': 500,
+    # 'max_depth': 30,
+    # 'min_samples_split': 10,
+    # 'min_samples_leaf': 3,
+    # 'max_features': 'sqrt',
+    # 'class_weight': 'balanced',
+    # 'random_state': 42,
+    # 'n_jobs': -1
+
+# Optimal parameters found for SVRM 4 with 30 window size:
+    # 'n_estimators': 500,
+    # 'max_depth': None,
+    # 'min_samples_split': 10,
+    # 'min_samples_leaf': 5,
+    # 'max_features': 'sqrt',
+    # 'class_weight': 'balanced',
+    # 'random_state': 42,
+    # 'n_jobs': -1

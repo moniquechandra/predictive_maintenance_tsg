@@ -6,5 +6,6 @@
 *.pkl
 *.feather
 *.png
+*.jpg
 visualisations/
 data/
