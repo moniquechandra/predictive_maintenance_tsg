@@ -68,6 +68,19 @@ def concat_csv_files(svrm_version):
             ]
 
         combined = pd.concat(dfs, ignore_index=True)
+
+        cols_to_scale = [
+            "StangHistorie[1].BeginVerduningPosHor",
+            "StangHistorie[1].BeginVerdunningPos",
+            "StangHistorie[1].EindVerduningPos",
+            "StangHistorie[1].EindVerduningPosHor",
+        ]
+
+        for col in cols_to_scale:
+            combined[col] = pd.to_numeric(combined[col], errors="coerce")
+            mask = combined[col].between(10, 100, inclusive="both")
+            combined.loc[mask, col] = combined.loc[mask, col] * 10
+
         combined.to_feather(feather_path)
 
         return combined
@@ -78,13 +91,20 @@ def create_afgekeurd_column(df,
                             afgekeurd_col="afgekeurd"):
     df = df.copy()
 
-    # Zet kolommen om naar numeriek, ongeldige waarden worden 0
-    df[knipteller_col] = pd.to_numeric(df[knipteller_col], errors='coerce').fillna(0)
-    df[goedgekeurd_col] = pd.to_numeric(df[goedgekeurd_col], errors='coerce').fillna(0)
+    df[knipteller_col] = pd.to_numeric(df[knipteller_col], errors="coerce").fillna(0)
+    df[goedgekeurd_col] = pd.to_numeric(df[goedgekeurd_col], errors="coerce").fillna(0)
 
-    # Totale afgekeurd = knipteller - goedgekeurd
-    df[afgekeurd_col] = (df[knipteller_col] - df[goedgekeurd_col]).clip(lower=0)
+    delta_knip = df[knipteller_col].diff().fillna(0)
+    delta_goed = df[goedgekeurd_col].diff().fillna(0)
 
+    reset_mask = delta_knip < 0
+    delta_knip[reset_mask] = df.loc[reset_mask, knipteller_col]
+
+    delta_goed = delta_goed.clip(lower=0)
+
+    delta_afgekeurd = (delta_knip - delta_goed).clip(lower=0)
+
+    df[afgekeurd_col] = delta_afgekeurd.cumsum()
     return df
 
 def build_feature_table(df, window_size):
@@ -190,6 +210,9 @@ def build_feature_table(df, window_size):
         .astype(int)
     )
 
+    agg_df["future_event_binary"] = (agg_df["future_event"] > 0).astype(int)
+
+
     return agg_df
 
 def train_random_forest(df, use_cv=True, manual_params=None, n_iter_search=20, use_shap=True, top_n_shap=10):
@@ -208,7 +231,7 @@ def train_random_forest(df, use_cv=True, manual_params=None, n_iter_search=20, u
 
     feature_cols = [col for col in df.columns if col.endswith("_slope")]
     X = df[feature_cols]
-    y = df["future_event"]
+    y = df["future_event_binary"]
 
     # Split into training and testing
     split_index = int(0.8 * len(df))
@@ -339,7 +362,7 @@ def explain_random_forest(best_rf, X_test, top_n=10):
 
     return conclusions
 
-def visualize_all_columns(df, output_dir="visualisations_svrm3"):
+def visualize_all_columns(df, output_dir="visualisations_svrm4"):
     os.makedirs(output_dir, exist_ok=True)
     
     # Remove columns with only "Undef" values
@@ -369,7 +392,7 @@ def show_column_specs(df, column_name):
     else:
         print(f"Column '{column_name}' does not exist in the DataFrame.")
 
-def plot_min_max_slopes_vs_time(df, output_dir="slope_visualizations_svrm3"):
+def plot_min_max_slopes_vs_time(df, output_dir="new_slope_visualizations_svrm3"):
     os.makedirs(output_dir, exist_ok=True)
 
     # Detect base feature names
@@ -438,17 +461,10 @@ def evaluate_window_sizes(df, window_sizes):
     plt.grid(True)
     plt.show()
 
-svrm_3_data = concat_csv_files(svrm_version="svrm3")
-svrm_3_df = build_feature_table(svrm_3_data, 15)
-train_random_forest(svrm_3_df, use_cv=False, n_iter_search=20, use_shap=True, top_n_shap=10)
-plot_min_max_slopes_vs_time(svrm_3_df)
-
-#svrm_4_df = build_feature_table(svrm_4_data, 30)
-#svrm_4_data = concat_csv_files(svrm_version="svrm4")
-#svrm_4_data = create_afgekeurd_column(svrm_4_data)
-
-
-
+svrm_4_data = concat_csv_files(svrm_version="svrm4")
+svrm_4_data = create_afgekeurd_column(svrm_4_data)
+svrm_4_df = build_feature_table(svrm_4_data, 40)
+train_random_forest(svrm_4_df, use_cv=True, n_iter_search=20, use_shap=True, top_n_shap=10)
 
 # Optimal parameters found for SVRM 3 with 15 window size:
     # 'n_estimators': 500,
