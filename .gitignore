@@ -5,7 +5,13 @@
 *.PX
 *.pkl
 *.feather
+<<<<<<< HEAD
 *.mp4
 *.png
 
+=======
+*.png
+*.jpg
+visualisations/
+>>>>>>> e0b0d036df9ca1c50ec4fdfe53fd4fb1f76d063a
 data/
