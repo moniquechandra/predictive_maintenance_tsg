@@ -38,7 +38,6 @@ def concat_csv_files(svrm_version):
 
         dfs = [load_csv(path) for path in csv_files]
 
-        # Columns to standardize
         stangdata_cols = [
             "Pos_inloCor_1_trek13", "Pos_inloCor_1_trek24",
             "Pos_inloCor_2_trek13", "Pos_inloCor_2_trek24",
@@ -85,43 +84,7 @@ def concat_csv_files(svrm_version):
 
         return combined
 
-def create_afgekeurd_column(df,
-                            knipteller_col="knipteller",
-                            goedgekeurd_col="goedgekeurd",
-                            afgekeurd_col="afgekeurd"):
-    df = df.copy()
-
-    df[knipteller_col] = pd.to_numeric(df[knipteller_col], errors="coerce").fillna(0)
-    df[goedgekeurd_col] = pd.to_numeric(df[goedgekeurd_col], errors="coerce").fillna(0)
-
-    delta_knip = df[knipteller_col].diff().fillna(0)
-    delta_goed = df[goedgekeurd_col].diff().fillna(0)
-
-    reset_mask = delta_knip < 0
-    delta_knip[reset_mask] = df.loc[reset_mask, knipteller_col]
-
-    delta_goed = delta_goed.clip(lower=0)
-
-    delta_afgekeurd = (delta_knip - delta_goed).clip(lower=0)
-
-    df[afgekeurd_col] = delta_afgekeurd.cumsum()
-    return df
-
 def build_feature_table(df, window_size):
-    """
-    Full feature engineering pipeline:
-    - clean data
-    - compute slopes
-    - aggregate into windows
-    - create future_event target
-
-    Returns:
-        agg_df (pd.DataFrame)
-    """
-
-    # -----------------------------
-    # 1. CLEAN
-    # -----------------------------
     df = (
         df.sort_values("TimeInt")
           .drop_duplicates(subset="TimeInt", keep="first")
@@ -129,9 +92,6 @@ def build_feature_table(df, window_size):
     )
     df = df[df["afgekeurd"] != "Undef"].reset_index(drop=True)
 
-    # -----------------------------
-    # 2. PREPARE NUMERIC COLUMNS
-    # -----------------------------
     df["afgekeurd"] = pd.to_numeric(df["afgekeurd"], errors="coerce")
     df["afgekeurd_inc"] = df["afgekeurd"].diff().fillna(0)
 
@@ -157,9 +117,6 @@ def build_feature_table(df, window_size):
 
     df[include_cols] = df[include_cols].apply(pd.to_numeric, errors="coerce")
 
-    # -----------------------------
-    # 3. SLOPE CALCULATION
-    # -----------------------------
     dt = np.diff(df["TimeInt"].values)
     dy = np.diff(df[include_cols].values, axis=0)
 
@@ -174,14 +131,11 @@ def build_feature_table(df, window_size):
         axis=1
     )
 
-    # -----------------------------
-    # 4. WINDOW AGGREGATION
-    # -----------------------------
     slope_cols = [c for c in slope_df.columns if c.endswith("_slope")]
     agg_rows = []
 
-    for start in range(0, len(slope_df) - window_size + 1, window_size):
-        window = slope_df.iloc[start:start + window_size]
+    for i in range(0, len(slope_df) - window_size + 1, window_size):
+        window = slope_df.iloc[i:i + window_size]
 
         row = {
             "time_start": window["TimeInt"].iloc[0],
@@ -199,9 +153,6 @@ def build_feature_table(df, window_size):
 
     agg_df = pd.DataFrame(agg_rows)
 
-    # -----------------------------
-    # 5. TARGET
-    # -----------------------------
     agg_df["future_event"] = (
         agg_df["sum_afgekeurd"]
         .shift(-1)
@@ -211,35 +162,18 @@ def build_feature_table(df, window_size):
     )
 
     agg_df["future_event_binary"] = (agg_df["future_event"] > 0).astype(int)
-
-
     return agg_df
 
-def train_random_forest(df, use_cv=True, manual_params=None, n_iter_search=20, use_shap=True, top_n_shap=10):
-    """
-    Train a Random Forest on the given dataframe with options for hyperparameter tuning or manual parameters,
-    including SHAP-based feature conclusions.
-    
-    Parameters:
-    - df: DataFrame with features ending in "_slope" and target "future_event"
-    - use_cv: bool, whether to use RandomizedSearchCV to find optimal hyperparameters
-    - manual_params: dict of RandomForestClassifier parameters (used if use_cv=False)
-    - n_iter_search: int, number of iterations for RandomizedSearchCV
-    - use_shap: bool, whether to compute SHAP explanations
-    - top_n_shap: int, number of top features to report via SHAP
-    """
-
+def train_random_forest(df, use_cv=True, manual_params=None, n_iter_search=20):
     feature_cols = [col for col in df.columns if col.endswith("_slope")]
     X = df[feature_cols]
     y = df["future_event_binary"]
 
-    # Split into training and testing
     split_index = int(0.8 * len(df))
     X_train, X_test = X.iloc[:split_index], X.iloc[split_index:]
     y_train, y_test = y.iloc[:split_index], y.iloc[split_index:]
 
     if use_cv:
-        # Hyperparameter distribution
         param_dist = {
             'n_estimators': [200, 500, 800, 1000],
             'max_depth': [None, 10, 20, 30],
@@ -249,25 +183,21 @@ def train_random_forest(df, use_cv=True, manual_params=None, n_iter_search=20, u
             'class_weight': ['balanced']
         }
 
-        # Base Random Forest
         rf = RandomForestClassifier(random_state=42, n_jobs=-1)
 
-        # Stratified CV for rare events
         cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
-        # Randomized Search CV
         rand_search = RandomizedSearchCV(
             estimator=rf,
             param_distributions=param_dist,
             n_iter=n_iter_search,
-            scoring='average_precision',  # PR-AUC for rare events
+            scoring='average_precision',
             cv=cv,
             n_jobs=-1,
             random_state=42,
             verbose=2
         )
 
-        # Fit Randomized Search
         rand_search.fit(X_train, y_train)
         print("Best hyperparameters:", rand_search.best_params_)
         print("Best PR-AUC (CV):", rand_search.best_score_)
@@ -275,7 +205,6 @@ def train_random_forest(df, use_cv=True, manual_params=None, n_iter_search=20, u
         best_rf = rand_search.best_estimator_
 
     else:
-        # Use manual parameters
         if manual_params is None:
             manual_params = {
                 'n_estimators': 500,
@@ -291,81 +220,21 @@ def train_random_forest(df, use_cv=True, manual_params=None, n_iter_search=20, u
         best_rf.fit(X_train, y_train)
         print("Random Forest trained with manual parameters:", manual_params)
 
-    # Permutation importance
     perm = permutation_importance(best_rf, X_test, y_test, n_repeats=20, random_state=42, n_jobs=-1)
     perm_importance = pd.Series(perm.importances_mean, index=X_test.columns).sort_values(ascending=False)
     print("\nTop 15 feature importances (permutation importance):")
     print(perm_importance.head(15))
 
-    # PR-AUC / ROC-AUC evaluation
     y_proba = best_rf.predict_proba(X_test)[:,1]
     print("\nModel Evaluation:")
     print("PR-AUC :", average_precision_score(y_test, y_proba))
     print("ROC-AUC:", roc_auc_score(y_test, y_proba))
 
-    # SHAP explanations
-    if use_shap:
-        print("\nGenerating SHAP-based feature conclusions...")
-        top_conclusions = explain_random_forest(best_rf, X_test, top_n=top_n_shap)
-    else:
-        top_conclusions = []
-
-    return best_rf, top_conclusions
-
-def explain_random_forest(best_rf, X_test, top_n=10):
-
-    # Create SHAP explainer
-    explainer = shap.TreeExplainer(best_rf)
-    shap_values = explainer.shap_values(X_test)
-
-    # For binary classification, pick class 1
-    if isinstance(shap_values, list):
-        shap_class1 = shap_values[1]  # shape = (n_samples, n_features)
-    else:
-        shap_class1 = shap_values
-
-    # Ensure it's 2D
-    if shap_class1.ndim != 2:
-        shap_class1 = shap_class1.reshape(X_test.shape[0], -1)
-
-    # Make sure the number of columns matches X_test
-    shap_class1 = shap_class1[:, :X_test.shape[1]]
-
-    # Compute mean absolute and mean SHAP values
-    mean_abs_shap = np.abs(shap_class1).mean(axis=0)
-    shap_mean = shap_class1.mean(axis=0)
-
-    # Now feature names match number of columns
-    feature_cols = X_test.columns[:shap_class1.shape[1]]
-
-    # Construct DataFrame safely
-    mean_shap = pd.DataFrame({
-        'feature': feature_cols,
-        'mean_abs_shap': mean_abs_shap,
-        'shap_mean': shap_mean
-    }).sort_values(by='mean_abs_shap', ascending=False)
-
-    top_features = mean_shap.head(top_n)
-    conclusions = []
-
-    print("\n--- Automatic Feature Conclusions ---\n")
-    for idx, row in top_features.iterrows():
-        feature = row['feature']
-        direction = "increase" if row['shap_mean'] > 0 else "decrease"
-        prob_change = abs(row['shap_mean'])
-        conclusion = f"High values of '{feature}' tend to {direction} the likelihood of a future event (avg SHAP impact ≈ {prob_change:.4f})"
-        conclusions.append(conclusion)
-        print(conclusion)
-
-    # Optional SHAP summary plot
-    shap.summary_plot(shap_class1, X_test, plot_type="bar", show=False)
-
-    return conclusions
+    return best_rf
 
 def visualize_all_columns(df, output_dir="visualisations_svrm4"):
     os.makedirs(output_dir, exist_ok=True)
     
-    # Remove columns with only "Undef" values
     cols_to_plot = [col for col in df.columns if not (df[col] == "Undef").all()]
     
     for col in cols_to_plot:
@@ -380,22 +249,9 @@ def visualize_all_columns(df, output_dir="visualisations_svrm4"):
         except:
             print(f"Cannot plot {col}")
 
-def show_column_specs(df, column_name):
-    if column_name in df.columns:
-        unique_values = df[column_name].unique()
-        num_unique = len(unique_values)
-        data_type = df[column_name].dtype
-        print(f"Column: {column_name}")
-        print(f"Data Type: {data_type}")
-        print(f"Number of Unique Values: {num_unique}")
-        print(f"Unique Values: {unique_values}")
-    else:
-        print(f"Column '{column_name}' does not exist in the DataFrame.")
-
 def plot_min_max_slopes_vs_time(df, output_dir="new_slope_visualizations_svrm3"):
     os.makedirs(output_dir, exist_ok=True)
 
-    # Detect base feature names
     max_cols = [c for c in df.columns if c.endswith("_max_slope")]
 
     for max_col in max_cols:
@@ -423,7 +279,6 @@ def evaluate_window_sizes(df, window_sizes):
 
     for w in window_sizes:
         print(f"Evaluating window size: {w}")
-        # Aggregate slopes into windows
         agg_df = build_feature_table(df, w)
         agg_df.loc[agg_df["sum_afgekeurd"] <= 0, "sum_afgekeurd"] = 0
         agg_df["future_event"] = agg_df["sum_afgekeurd"].shift(-1).fillna(0).gt(0).astype(int)
@@ -432,12 +287,10 @@ def evaluate_window_sizes(df, window_sizes):
         X = agg_df[feature_cols]
         y = agg_df["future_event"]
 
-        # Split train/test
         X_train, X_test, y_train, y_test = train_test_split(
             X, y, test_size=0.2, random_state=42, stratify=y
         )
 
-        # Train a small Random Forest (faster) for evaluation
         clf = RandomForestClassifier(
             n_estimators=200,
             max_depth=None,
@@ -447,12 +300,10 @@ def evaluate_window_sizes(df, window_sizes):
         )
         clf.fit(X_train, y_train)
 
-        # Predict probabilities for PR-AUC
         y_proba = clf.predict_proba(X_test)[:,1]
         pr_auc = average_precision_score(y_test, y_proba)
         pr_aucs.append(pr_auc)
 
-    # Plot PR-AUC vs window size
     plt.figure(figsize=(10,5))
     plt.plot(window_sizes, pr_aucs, marker='o')
     plt.xlabel("Window size")
@@ -461,10 +312,10 @@ def evaluate_window_sizes(df, window_sizes):
     plt.grid(True)
     plt.show()
 
-svrm_4_data = concat_csv_files(svrm_version="svrm4")
-svrm_4_data = create_afgekeurd_column(svrm_4_data)
-svrm_4_df = build_feature_table(svrm_4_data, 40)
-train_random_forest(svrm_4_df, use_cv=True, n_iter_search=20, use_shap=True, top_n_shap=10)
+svrm_3_data = concat_csv_files(svrm_version="svrm3")
+svrm_3_df = build_feature_table(svrm_3_data, 15)
+train_random_forest(svrm_3_df, use_cv=True, n_iter_search=20)
+
 
 # Optimal parameters found for SVRM 3 with 15 window size:
     # 'n_estimators': 500,
